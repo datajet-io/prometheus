@@ -91,6 +91,16 @@ var (
 	DefaultServersetSDConfig = ServersetSDConfig{
 		Timeout: Duration(10 * time.Second),
 	}
+
+	// The default EC2 SD configuration.
+	DefaultEC2SDConfig = EC2SDConfig{
+		RefreshInterval: Duration(30 * time.Second),
+	}
+
+	// The default Marathon SD configuration.
+	DefaultMarathonSDConfig = MarathonSDConfig{
+		RefreshInterval: Duration(30 * time.Second),
+	}
 )
 
 // Config is the top-level configuration for Prometheus's config files.
@@ -216,6 +226,10 @@ type ScrapeConfig struct {
 	ConsulSDConfigs []*ConsulSDConfig `yaml:"consul_sd_configs,omitempty"`
 	// List of Serverset service discovery configurations.
 	ServersetSDConfigs []*ServersetSDConfig `yaml:"serverset_sd_configs,omitempty"`
+	// List of EC2 service discovery configurations.
+	EC2SDConfigs []*EC2SDConfig `yaml:"ec2_sd_configs,omitempty"`
+	// List of Marathon service discovery configurations.
+	MarathonSDConfigs []*MarathonSDConfig `yaml:"marathon_sd_configs,omitempty"`
 
 	// List of target relabel configurations.
 	RelabelConfigs []*RelabelConfig `yaml:"relabel_configs,omitempty"`
@@ -446,6 +460,52 @@ func (c *ServersetSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) err
 		}
 	}
 	return nil
+}
+
+// EC2SDConfig is the configuration for AWS EC2 based service discovery.
+type EC2SDConfig struct {
+	Region          string   `yaml:"region"`
+	RefreshInterval Duration `yaml:"refresh_interval,omitempty"`
+
+	// Catches all undefined fields and must be empty after parsing.
+	XXX map[string]interface{} `yaml:",inline"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *EC2SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	*c = DefaultEC2SDConfig
+	type plain EC2SDConfig
+	err := unmarshal((*plain)(c))
+	if err != nil {
+		return err
+	}
+	if c.Region == "" {
+		return fmt.Errorf("EC2-SD config must specify a region")
+	}
+	return checkOverflow(c.XXX, "ec2_sd_config")
+}
+
+// MarathonSDConfig is the configuration for AWS Marathon based service discovery.
+type MarathonSDConfig struct {
+	MarathonHost    string   `yaml:"marathon_host"`
+	RefreshInterval Duration `yaml:"refresh_interval,omitempty"`
+
+	// Catches all undefined fields and must be empty after parsing.
+	XXX map[string]interface{} `yaml:",inline"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *MarathonSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	*c = DefaultMarathonSDConfig
+	type plain MarathonSDConfig
+	err := unmarshal((*plain)(c))
+	if err != nil {
+		return err
+	}
+	if c.MarathonHost == "" {
+		return fmt.Errorf("Marathon-SD config must specify a marathon host")
+	}
+	return checkOverflow(c.XXX, "marathon_sd_config")
 }
 
 // RelabelAction is the action to be performed on relabeling.

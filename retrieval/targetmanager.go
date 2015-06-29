@@ -392,6 +392,12 @@ func ProvidersFromConfig(cfg *config.ScrapeConfig) []TargetProvider {
 	for _, c := range cfg.ServersetSDConfigs {
 		providers = append(providers, discovery.NewServersetDiscovery(c))
 	}
+	for _, c := range cfg.EC2SDConfigs {
+		providers = append(providers, discovery.NewEC2Discovery(c))
+	}
+	for _, c := range cfg.MarathonSDConfigs {
+		providers = append(providers, discovery.NewMarathonDiscovery(c))
+	}
 	if len(cfg.TargetGroups) > 0 {
 		providers = append(providers, NewStaticProvider(cfg.TargetGroups))
 	}
