@@ -28,10 +28,11 @@ import (
 )
 
 var (
-	patFileSDName = regexp.MustCompile(`^[^*]*(\*[^/]*)?\.(json|yml|yaml|JSON|YML|YAML)$`)
-	patRulePath   = regexp.MustCompile(`^[^*]*(\*[^/]*)?$`)
-	patAuthLine   = regexp.MustCompile(`((?:password|bearer_token|secret_key|client_secret):\s+)(".+"|'.+'|[^\s]+)`)
-	relabelTarget = regexp.MustCompile(`^(?:(?:[a-zA-Z_]|\$(?:\{\w+\}|\w+))+\w*)+$`)
+	patFileSDName                   = regexp.MustCompile(`^[^*]*(\*[^/]*)?\.(json|yml|yaml|JSON|YML|YAML)$`)
+	patRulePath                     = regexp.MustCompile(`^[^*]*(\*[^/]*)?$`)
+	patAuthLine                     = regexp.MustCompile(`((?:password|bearer_token|secret_key|client_secret):\s+)(".+"|'.+'|[^\s]+)`)
+	relabelTarget                   = regexp.MustCompile(`^(?:(?:[a-zA-Z_]|\$(?:\{\w+\}|\w+))+\w*)+$`)
+	metricsEndpointEnvKeyValidation = regexp.MustCompile("^[a-zA-Z0-9_]*$")
 )
 
 // Load parses the YAML input s into a Config.
@@ -920,6 +921,7 @@ type MarathonSDConfig struct {
 	Timeout         model.Duration `yaml:"timeout,omitempty"`
 	RefreshInterval model.Duration `yaml:"refresh_interval,omitempty"`
 	TLSConfig       TLSConfig      `yaml:"tls_config,omitempty"`
+	MetricsEndpoint string         `yaml:"metrics_endpoint_env_key,omitempty"`
 
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline"`
@@ -938,6 +940,11 @@ func (c *MarathonSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) erro
 	}
 	if len(c.Servers) == 0 {
 		return fmt.Errorf("Marathon SD config must contain at least one Marathon server")
+	}
+
+	reMatch := metricsEndpointEnvKeyValidation.MatchString(c.MetricsEndpoint)
+	if len(c.MetricsEndpoint) > 0 && !reMatch {
+		c.MetricsEndpoint = ""
 	}
 
 	return nil

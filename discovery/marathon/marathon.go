@@ -20,6 +20,8 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"regexp"
+	"strconv"
 	"time"
 
 	"golang.org/x/net/context"
@@ -44,6 +46,11 @@ const (
 	// taskLabel contains the mesos task name of the app instance.
 	taskLabel model.LabelName = metaLabelPrefix + "task"
 
+	// default port index for metrics collection
+	metricsEndpointDefaultPortIndex = 0
+	// default path for metrics collection
+	metricsEndpointDefaultPath = "/metrics"
+
 	// Constants for instrumentation.
 	namespace = "prometheus"
 )
@@ -61,6 +68,9 @@ var (
 			Name:      "sd_marathon_refresh_duration_seconds",
 			Help:      "The duration of a Marathon-SD refresh in seconds.",
 		})
+
+	// metricsEndpointEnvValue validation regex, for the value it points to in the app's ENV map
+	metricsEndpointValueValidation = regexp.MustCompile("^:([0-9]{1,1})(/[a-zA-Z0-9_]*)$")
 )
 
 func init() {
@@ -72,11 +82,12 @@ const appListPath string = "/v2/apps/?embed=apps.tasks"
 
 // Discovery provides service discovery based on a Marathon instance.
 type Discovery struct {
-	client          *http.Client
-	servers         []string
-	refreshInterval time.Duration
-	lastRefresh     map[string]*config.TargetGroup
-	appsClient      AppListClient
+	client                *http.Client
+	servers               []string
+	refreshInterval       time.Duration
+	lastRefresh           map[string]*config.TargetGroup
+	appsClient            AppListClient
+	metricsEndpointEnvKey string
 }
 
 // Initialize sets up the discovery for usage.
@@ -94,10 +105,11 @@ func NewDiscovery(conf *config.MarathonSDConfig) (*Discovery, error) {
 	}
 
 	return &Discovery{
-		client:          client,
-		servers:         conf.Servers,
-		refreshInterval: time.Duration(conf.RefreshInterval),
-		appsClient:      fetchApps,
+		client:                client,
+		servers:               conf.Servers,
+		refreshInterval:       time.Duration(conf.RefreshInterval),
+		appsClient:            fetchApps,
+		metricsEndpointEnvKey: conf.MetricsEndpoint,
 	}, nil
 }
 
@@ -160,12 +172,12 @@ func (md *Discovery) updateServices(ctx context.Context, ch chan<- []*config.Tar
 
 func (md *Discovery) fetchTargetGroups() (map[string]*config.TargetGroup, error) {
 	url := RandomAppsURL(md.servers)
-	apps, err := md.appsClient(md.client, url)
+	apps, err := md.appsClient(md.client, url, md.metricsEndpointEnvKey)
 	if err != nil {
 		return nil, err
 	}
 
-	groups := AppsToTargetGroups(apps)
+	groups := AppsToTargetGroups(apps, md.metricsEndpointEnvKey)
 	return groups, nil
 }
 
@@ -193,6 +205,7 @@ type App struct {
 	RunningTasks int               `json:"tasksRunning"`
 	Labels       map[string]string `json:"labels"`
 	Container    Container         `json:"container"`
+	Env          map[string]string `json:"env"`
 }
 
 // AppList is a list of Marathon apps.
@@ -201,10 +214,10 @@ type AppList struct {
 }
 
 // AppListClient defines a function that can be used to get an application list from marathon.
-type AppListClient func(client *http.Client, url string) (*AppList, error)
+type AppListClient func(client *http.Client, url, metricsEndpointEnvKey string) (*AppList, error)
 
 // fetchApps requests a list of applications from a marathon server.
-func fetchApps(client *http.Client, url string) (*AppList, error) {
+func fetchApps(client *http.Client, url, metricsEndpointEnvKey string) (*AppList, error) {
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
@@ -215,7 +228,33 @@ func fetchApps(client *http.Client, url string) (*AppList, error) {
 		return nil, err
 	}
 
-	return parseAppJSON(body)
+	rawAppList, err := parseAppJSON(body)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no metricsEndpointEnvKey value is configured, return the raw list immediately
+	if metricsEndpointEnvKey == "" {
+		return rawAppList, nil
+	}
+
+	curatedAppList := make([]App, 0)
+	// Make sure we only return apps which have a valid metricsEndpointEnvKey ENV var present
+	for _, app := range rawAppList.Apps {
+		// Check if metricsEndpointEnvKey points to a valid ENV key
+		if _, ok := app.Env[metricsEndpointEnvKey]; !ok {
+			continue
+		}
+
+		// Check that ENV key contains a valid value
+		reMatch := metricsEndpointValueValidation.MatchString(app.Env[metricsEndpointEnvKey])
+		if !reMatch {
+			log.Warnf("Skipping '%s' because of invalid metricsEndpointEnvKey ENV value: %s", app.Env[metricsEndpointEnvKey])
+			continue
+		}
+		curatedAppList = append(curatedAppList, app)
+	}
+	return &AppList{Apps: curatedAppList}, nil
 }
 
 func parseAppJSON(body []byte) (*AppList, error) {
@@ -236,18 +275,18 @@ func RandomAppsURL(servers []string) string {
 }
 
 // AppsToTargetGroups takes an array of Marathon apps and converts them into target groups.
-func AppsToTargetGroups(apps *AppList) map[string]*config.TargetGroup {
+func AppsToTargetGroups(apps *AppList, metricsEndpointEnvKey string) map[string]*config.TargetGroup {
 	tgroups := map[string]*config.TargetGroup{}
 	for _, a := range apps.Apps {
-		group := createTargetGroup(&a)
+		group := createTargetGroup(&a, metricsEndpointEnvKey)
 		tgroups[group.Source] = group
 	}
 	return tgroups
 }
 
-func createTargetGroup(app *App) *config.TargetGroup {
+func createTargetGroup(app *App, metricsEndpointEnvKey string) *config.TargetGroup {
 	var (
-		targets = targetsForApp(app)
+		targets = targetsForApp(app, metricsEndpointEnvKey)
 		appName = model.LabelValue(app.ID)
 		image   = model.LabelValue(app.Container.Docker.Image)
 	)
@@ -268,21 +307,33 @@ func createTargetGroup(app *App) *config.TargetGroup {
 	return tg
 }
 
-func targetsForApp(app *App) []model.LabelSet {
+func targetsForApp(app *App, metricsEndpointEnvKey string) []model.LabelSet {
 	targets := make([]model.LabelSet, 0, len(app.Tasks))
+
+	metricsPortIndex := metricsEndpointDefaultPortIndex
+	metricsPath := metricsEndpointDefaultPath
+
+	if metricsEndpointEnvKey != "" {
+		regexSubMatches := metricsEndpointValueValidation.FindStringSubmatch(app.Env[metricsEndpointEnvKey])
+		metricsPortIndex, _ = strconv.Atoi(regexSubMatches[1])
+		metricsPath = regexSubMatches[2]
+	}
+
 	for _, t := range app.Tasks {
-		if len(t.Ports) == 0 {
+		if !(metricsPortIndex < len(t.Ports)) {
+			log.Warnf("Skipping marathon app task '%s' because of invalid metricsPortIndex: %s", t.ID, metricsPortIndex)
 			continue
 		}
-		target := targetForTask(&t)
+		target := targetForTask(&t, metricsPortIndex)
 		targets = append(targets, model.LabelSet{
-			model.AddressLabel: model.LabelValue(target),
-			taskLabel:          model.LabelValue(t.ID),
+			model.AddressLabel:     model.LabelValue(target),
+			model.MetricsPathLabel: model.LabelValue(metricsPath),
+			taskLabel:              model.LabelValue(t.ID),
 		})
 	}
 	return targets
 }
 
-func targetForTask(task *Task) string {
-	return net.JoinHostPort(task.Host, fmt.Sprintf("%d", task.Ports[0]))
+func targetForTask(task *Task, prometheusEndpointPortIndex int) string {
+	return net.JoinHostPort(task.Host, fmt.Sprintf("%d", task.Ports[prometheusEndpointPortIndex]))
 }
